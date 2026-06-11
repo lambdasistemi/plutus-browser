@@ -19,9 +19,18 @@ export default defineConfig({
   use: {
     baseURL,
     ...devices["Desktop Chrome"],
+    headless: true,
     launchOptions: {
       executablePath,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--no-zygote",
+        "--ozone-platform=headless",
+      ],
     },
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
