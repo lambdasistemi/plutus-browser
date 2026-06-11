@@ -19,23 +19,22 @@ const escapeRegExp = (value) =>
 const snippetButtonPattern = (name) =>
   new RegExp(`^${escapeRegExp(name)}\\b`);
 
-const snippetButtons = (page) =>
-  page.getByRole("list", { name: "Snippets" }).getByRole("button");
+const snippetRows = (page) => page.getByTestId("snippet-row");
 
 async function waitForSnippetStore(page) {
-  await expect(page.getByRole("button", { name: "New snippet" })).toBeEnabled();
+  await expect(page.getByLabel("Quick add snippet")).toBeEnabled();
   await expect(page.getByRole("button", { name: snippetButtonPattern(firstExampleName) })).toBeVisible();
 }
 
 async function createEmptySnippet(page, name) {
-  await page.getByRole("button", { name: "New snippet" }).click();
-  await page.getByLabel("Snippet name").fill(name);
-  await page.getByRole("button", { name: "Create" }).click();
+  await page.getByLabel("Quick add snippet").fill(name);
+  await page.getByRole("button", { name: "Add snippet" }).click();
   await expect(page.getByRole("button", { name: snippetButtonPattern(name) })).toBeVisible();
 }
 
-async function openNewSnippetDialog(page, name) {
-  await page.getByRole("button", { name: "New snippet" }).click();
+async function openNewSnippetDialog(page, name, source) {
+  await page.getByRole("button", { name: "new from..." }).click();
+  await page.getByRole("menuitem", { name: source }).click();
   const dialog = page.getByRole("dialog", { name: "New snippet" });
   await expect(dialog).toBeVisible();
   await dialog.getByLabel("Snippet name").fill(name);
@@ -59,8 +58,17 @@ test("seeds verified examples on first run and persists them", async ({ page }) 
 
   await page.goto("/");
   await waitForSnippetStore(page);
+  await expect(page).toHaveTitle("Plutus Browser");
+  await expect(page.getByRole("link", { name: "repo" })).toHaveAttribute(
+    "href",
+    "https://github.com/lambdasistemi/plutus-browser",
+  );
+  await expect(page.getByRole("link", { name: "evaluator" })).toHaveAttribute(
+    "href",
+    "https://github.com/lambdasistemi/plutus/releases/tag/1.65.0.0-wasm32.1",
+  );
 
-  await expect(snippetButtons(page)).toHaveCount(seededExampleCount);
+  await expect(snippetRows(page)).toHaveCount(seededExampleCount);
   await page.getByRole("button", { name: snippetButtonPattern(factorialExampleName) }).click();
   await expect(editor).toContainText("equalsInteger");
 
@@ -69,7 +77,7 @@ test("seeds verified examples on first run and persists them", async ({ page }) 
 
   await page.reload();
   await waitForSnippetStore(page);
-  await expect(snippetButtons(page)).toHaveCount(seededExampleCount);
+  await expect(snippetRows(page)).toHaveCount(seededExampleCount);
   await expect(page.getByRole("button", { name: snippetButtonPattern(factorialExampleName) })).toBeVisible();
 });
 
@@ -139,6 +147,38 @@ test("manages named auto-versioned snippets in browser storage", async ({ page }
   ).toBeVisible();
 });
 
+test("supports todo-list inline add, rename, and delete", async ({ page }) => {
+  const enterAdded = "Inline enter add";
+  const buttonAdded = "Inline button add";
+  const renamed = "Inline renamed";
+
+  await page.goto("/");
+  await waitForSnippetStore(page);
+  await expect(snippetRows(page)).toHaveCount(seededExampleCount);
+
+  await page.getByLabel("Quick add snippet").fill(enterAdded);
+  await page.getByLabel("Quick add snippet").press("Enter");
+  await expect(page.getByRole("button", { name: snippetButtonPattern(enterAdded) })).toBeVisible();
+
+  await page.getByLabel("Quick add snippet").fill(buttonAdded);
+  await page.getByRole("button", { name: "Add snippet" }).click();
+  await expect(page.getByRole("button", { name: snippetButtonPattern(buttonAdded) })).toBeVisible();
+  await expect(snippetRows(page)).toHaveCount(seededExampleCount + 2);
+
+  await page.getByRole("button", { name: snippetButtonPattern(buttonAdded) }).hover();
+  await page.getByRole("button", { name: `Rename ${buttonAdded}` }).click();
+  await page.getByLabel("Rename snippet").fill(renamed);
+  await page.getByRole("button", { name: "Save rename" }).click();
+  await expect(page.getByRole("button", { name: snippetButtonPattern(renamed) })).toBeVisible();
+  await expect(page.getByRole("button", { name: snippetButtonPattern(buttonAdded) })).toHaveCount(0);
+
+  await page.getByRole("button", { name: snippetButtonPattern(renamed) }).hover();
+  await page.getByRole("button", { name: `Delete ${renamed}` }).click();
+  await expect(page.getByRole("button", { name: snippetButtonPattern(renamed) })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: snippetButtonPattern(enterAdded) })).toBeVisible();
+  await expect(snippetRows(page)).toHaveCount(seededExampleCount + 1);
+});
+
 test("creates new snippets from empty, copy, file, and URL sources", async ({ page }) => {
   const editor = page.getByLabel("UPLC program");
 
@@ -154,15 +194,13 @@ test("creates new snippets from empty, copy, file, and URL sources", async ({ pa
 
   await createEmptySnippet(page, "Empty source test");
 
-  let dialog = await openNewSnippetDialog(page, "Copy source test");
-  await chooseSelectOption(page, "Snippet source", "Copy of snippet");
+  let dialog = await openNewSnippetDialog(page, "Copy source test", "Copy existing");
   await chooseSelectOption(page, "Copy source", "02-multiply-integers");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("button", { name: snippetButtonPattern("Copy source test") })).toBeVisible();
   await expect(editor).toContainText("multiplyInteger");
 
-  dialog = await openNewSnippetDialog(page, "File source test");
-  await chooseSelectOption(page, "Snippet source", "From local file");
+  dialog = await openNewSnippetDialog(page, "File source test", "Local file");
   await dialog.locator('input[type="file"]').setInputFiles({
     name: "local.uplc",
     mimeType: "text/plain",
@@ -173,8 +211,7 @@ test("creates new snippets from empty, copy, file, and URL sources", async ({ pa
   await expect(page.getByRole("button", { name: snippetButtonPattern("File source test") })).toBeVisible();
   await expect(editor).toContainText("subtractInteger");
 
-  dialog = await openNewSnippetDialog(page, "URL source test");
-  await chooseSelectOption(page, "Snippet source", "From URL");
+  dialog = await openNewSnippetDialog(page, "URL source test", "URL");
   await dialog.getByLabel("Snippet URL").fill("/remote-snippet.uplc");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("button", { name: snippetButtonPattern("URL source test") })).toBeVisible();

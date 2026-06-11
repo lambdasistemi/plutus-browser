@@ -3,6 +3,9 @@
 Browser UI for the wasm32 Plutus evaluator: UPLC editor, evaluator output, and
 browser-local snippets.
 
+- App repository: https://github.com/lambdasistemi/plutus-browser
+- Evaluator release: https://github.com/lambdasistemi/plutus/releases/tag/1.65.0.0-wasm32.1
+
 ## Development
 
 ```sh
@@ -12,7 +15,7 @@ just bundle
 just serve
 ```
 
-The app downloads the released `uplc.wasm` artifact with:
+The app downloads `uplc.wasm` from the evaluator release above with:
 
 ```sh
 npm run prepare:wasm

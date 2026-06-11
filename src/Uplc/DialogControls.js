@@ -2,6 +2,7 @@ import * as React from "react";
 
 import FormControl from "@mui/material/FormControl";
 import InputLabel from "@mui/material/InputLabel";
+import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 
@@ -28,3 +29,6 @@ export const selectField = (props) => (children) => {
 
 export const menuItem = (props) => (children) =>
   React.createElement(MenuItem, props, ...children);
+
+export const menu = (props) => (children) =>
+  React.createElement(Menu, props, ...children);
