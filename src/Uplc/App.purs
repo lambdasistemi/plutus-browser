@@ -19,7 +19,7 @@ import Effect.Exception (message)
 import React.Basic (JSX, keyed)
 import React.Basic.DOM as R
 import React.Basic.DOM.Events as DOMEvents
-import React.Basic.Events (SyntheticEvent, handler, handler_, syntheticEvent)
+import React.Basic.Events (SyntheticEvent, handler, handler_, merge, syntheticEvent)
 import React.Basic.Hooks (component, useEffect, useEffectOnce, useState, (/\))
 import React.Basic.Hooks as React
 import SpaKit.BrowserGit (BrowserRepo, CommitInfo)
@@ -32,6 +32,7 @@ import Uplc.Examples (examples)
 import Uplc.Format (formatUplc)
 import Uplc.Runner (runUplc)
 import Uplc.SnippetImport (fetchText, readFirstFileText)
+import Uplc.SnippetStore as SnippetStore
 import Uplc.Timer as Timer
 
 defaultProgram :: String
@@ -88,6 +89,11 @@ type SnippetState =
   , active :: String
   , content :: String
   , history :: Array CommitInfo
+  }
+
+type MenuPosition =
+  { top :: Number
+  , left :: Number
   }
 
 loadInitialSnippets :: String -> Effect Unit -> (SnippetState -> Effect Unit) -> (String -> Effect Unit) -> Effect Unit
@@ -159,6 +165,12 @@ mkApp = component "UplcApp" \_ -> React.do
   newFileText /\ setNewFileText <- useState (Nothing :: Maybe String)
   newFileLabel /\ setNewFileLabel <- useState ""
   newError /\ setNewError <- useState ""
+  quickName /\ setQuickName <- useState ""
+  quickError /\ setQuickError <- useState ""
+  newFromMenu /\ setNewFromMenu <- useState (Nothing :: Maybe MenuPosition)
+  renamingSnippet /\ setRenamingSnippet <- useState (Nothing :: Maybe String)
+  renameName /\ setRenameName <- useState ""
+  renameError /\ setRenameError <- useState ""
 
   let
     dirty =
@@ -278,15 +290,174 @@ mkApp = component "UplcApp" \_ -> React.do
       setNewFileLabel (const "")
       setNewError (const "")
 
-    openNewDialog :: Effect Unit
-    openNewDialog = do
+    openNewDialogFrom :: String -> Effect Unit
+    openNewDialogFrom source = do
       resetNewDialog
+      setNewSource (const source)
       setNewOpen (const true)
+      setNewFromMenu (const Nothing)
+
+    openNewFromMenu :: { clientX :: Maybe Number, clientY :: Maybe Number } -> Effect Unit
+    openNewFromMenu event = do
+      setNewFromMenu
+        ( const
+            ( Just
+                { left: fromMaybe 24.0 event.clientX
+                , top: fromMaybe 80.0 event.clientY
+                }
+            )
+        )
+
+    closeNewFromMenu :: Effect Unit
+    closeNewFromMenu =
+      setNewFromMenu (const Nothing)
 
     changeNewSource :: String -> Effect Unit
     changeNewSource source = do
       setNewSource (const source)
       setNewError (const "")
+
+    createQuickSnippet :: Effect Unit
+    createQuickSnippet =
+      case repo of
+        Nothing -> setQuickError (const "Snippet store is not ready")
+        Just currentRepo -> do
+          let
+            name = normaliseName quickName
+          case validateNewName snippets name of
+            Just err -> setQuickError (const err)
+            Nothing -> do
+              setStoreBusy (const true)
+              setQuickError (const "")
+              launchAff_ do
+                result <- attempt do
+                  _ <- BrowserGit.writeAndCommit currentRepo (snippetPath name) "" ("create " <> name)
+                  names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
+                  nextHistory <- BrowserGit.log currentRepo (snippetPath name)
+                  pure { names, nextHistory }
+                liftEffect do
+                  setStoreBusy (const false)
+                  case result of
+                    Left err -> setQuickError (const ("Create failed: " <> message err))
+                    Right created -> do
+                      setSnippets (const created.names)
+                      setActiveSnippet (const (Just name))
+                      setProgram (const "")
+                      setPersistedProgram (const "")
+                      setHistory (const created.nextHistory)
+                      setViewingVersion (const Nothing)
+                      setQuickName (const "")
+                      setStatus (const ("Created " <> name))
+
+    startRename :: String -> Effect Unit
+    startRename name = do
+      setRenamingSnippet (const (Just name))
+      setRenameName (const name)
+      setRenameError (const "")
+
+    cancelRename :: Effect Unit
+    cancelRename = do
+      setRenamingSnippet (const Nothing)
+      setRenameName (const "")
+      setRenameError (const "")
+
+    commitRename :: String -> Effect Unit
+    commitRename oldName =
+      case repo of
+        Nothing -> setRenameError (const "Snippet store is not ready")
+        Just currentRepo -> do
+          let
+            nextName = normaliseName renameName
+
+            existing =
+              Array.filter (_ /= oldName) snippets
+          if nextName == oldName then
+            cancelRename
+          else
+            case validateNewName existing nextName of
+              Just err -> setRenameError (const err)
+              Nothing -> do
+                setStoreBusy (const true)
+                setRenameError (const "")
+                launchAff_ do
+                  result <- attempt do
+                    when (activeSnippet == Just oldName && dirty) do
+                      _ <- BrowserGit.writeAndCommit currentRepo (snippetPath oldName) program ("edit " <> oldName)
+                      pure unit
+                    _ <- SnippetStore.renameAndCommit currentRepo (snippetPath oldName) (snippetPath nextName) ("rename " <> oldName <> " to " <> nextName)
+                    names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
+                    let
+                      nextActive =
+                        if activeSnippet == Just oldName then
+                          Just nextName
+                        else
+                          activeSnippet
+                    nextContent <-
+                      case nextActive of
+                        Just active -> BrowserGit.readFile currentRepo (snippetPath active)
+                        Nothing -> pure ""
+                    nextHistory <-
+                      case nextActive of
+                        Just active -> BrowserGit.log currentRepo (snippetPath active)
+                        Nothing -> pure []
+                    pure { names, nextActive, nextContent, nextHistory }
+                  liftEffect do
+                    setStoreBusy (const false)
+                    case result of
+                      Left err -> setRenameError (const ("Rename failed: " <> message err))
+                      Right renamed -> do
+                        setSnippets (const renamed.names)
+                        setActiveSnippet (const renamed.nextActive)
+                        setProgram (const renamed.nextContent)
+                        setPersistedProgram (const renamed.nextContent)
+                        setHistory (const renamed.nextHistory)
+                        setViewingVersion (const Nothing)
+                        cancelRename
+                        setStatus (const ("Renamed " <> oldName <> " to " <> nextName))
+
+    deleteSnippet :: String -> Effect Unit
+    deleteSnippet name =
+      case repo of
+        Nothing -> setStatus (const "Snippet store is not ready")
+        Just currentRepo ->
+          if Array.length snippets <= 1 then
+            setStatus (const "Keep at least one snippet")
+          else do
+            setStoreBusy (const true)
+            launchAff_ do
+              result <- attempt do
+                _ <- SnippetStore.deleteAndCommit currentRepo (snippetPath name) ("delete " <> name)
+                names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
+                let
+                  nextActive =
+                    if activeSnippet == Just name then
+                      Array.head names
+                    else
+                      case activeSnippet of
+                        Just active -> Just active
+                        Nothing -> Array.head names
+                nextContent <-
+                  case nextActive of
+                    Just active -> BrowserGit.readFile currentRepo (snippetPath active)
+                    Nothing -> pure ""
+                nextHistory <-
+                  case nextActive of
+                    Just active -> BrowserGit.log currentRepo (snippetPath active)
+                    Nothing -> pure []
+                pure { names, nextActive, nextContent, nextHistory }
+              liftEffect do
+                setStoreBusy (const false)
+                case result of
+                  Left err -> setStatus (const ("Delete failed: " <> message err))
+                  Right deleted -> do
+                    setSnippets (const deleted.names)
+                    setActiveSnippet (const deleted.nextActive)
+                    setProgram (const deleted.nextContent)
+                    setPersistedProgram (const deleted.nextContent)
+                    setHistory (const deleted.nextHistory)
+                    setViewingVersion (const Nothing)
+                    when (renamingSnippet == Just name) cancelRename
+                    setStatus (const ("Deleted " <> name))
 
     readSnippetFile :: SyntheticEvent -> Effect Unit
     readSnippetFile event = do
@@ -427,7 +598,33 @@ mkApp = component "UplcApp" \_ -> React.do
                 , color: "text.primary"
                 }
             }
-            [ snippetDrawer snippets activeSnippet savedLabel history viewingVersion storeBusy openNewDialog loadSnippet viewHistory restoreViewedVersion
+            [ snippetDrawer
+                { snippets
+                , activeSnippet
+                , savedLabel
+                , history
+                , viewingVersion
+                , busy: storeBusy
+                , quickName
+                , quickError
+                , newFromMenu
+                , renamingSnippet
+                , renameName
+                , renameError
+                , setQuickName
+                , createQuickSnippet
+                , openNewFromMenu
+                , closeNewFromMenu
+                , openNewDialogFrom
+                , startRename
+                , cancelRename
+                , setRenameName
+                , commitRename
+                , deleteSnippet
+                , loadSnippet
+                , viewHistory
+                , restoreViewedVersion
+                }
             , M.box
                 { sx:
                     { flexGrow: 1
@@ -504,87 +701,273 @@ mkApp = component "UplcApp" \_ -> React.do
         ]
     )
 
-snippetDrawer
-  :: Array String
-  -> Maybe String
-  -> String
-  -> Array CommitInfo
-  -> Maybe CommitInfo
-  -> Boolean
-  -> Effect Unit
-  -> (String -> Effect Unit)
-  -> (CommitInfo -> Effect Unit)
-  -> Effect Unit
-  -> JSX
-snippetDrawer snippets activeSnippet savedLabel history viewingVersion busy openNewDialog loadSnippet viewHistory restoreViewedVersion =
-  M.drawer
-    { variant: "permanent"
-    , sx:
-        { width: drawerWidth
-        , flexShrink: 0
-        , "& .MuiDrawer-paper":
-            { width: drawerWidth
-            , boxSizing: "border-box"
-            , position: "relative"
-            , height: "100vh"
-            , overflow: "hidden"
-            }
-        }
-    }
-    [ M.box
-        { sx:
-            { height: "100%"
-            , display: "flex"
-            , flexDirection: "column"
-            , borderRight: "1px solid"
-            , borderColor: "divider"
-            }
-        }
-        [ M.box { sx: { p: 2 } }
-            [ M.button
-                { variant: "contained"
-                , fullWidth: true
-                , onClick: openNewDialog
-                , disabled: busy
+type SnippetDrawerProps =
+  { snippets :: Array String
+  , activeSnippet :: Maybe String
+  , savedLabel :: String
+  , history :: Array CommitInfo
+  , viewingVersion :: Maybe CommitInfo
+  , busy :: Boolean
+  , quickName :: String
+  , quickError :: String
+  , newFromMenu :: Maybe MenuPosition
+  , renamingSnippet :: Maybe String
+  , renameName :: String
+  , renameError :: String
+  , setQuickName :: (String -> String) -> Effect Unit
+  , createQuickSnippet :: Effect Unit
+  , openNewFromMenu :: { clientX :: Maybe Number, clientY :: Maybe Number } -> Effect Unit
+  , closeNewFromMenu :: Effect Unit
+  , openNewDialogFrom :: String -> Effect Unit
+  , startRename :: String -> Effect Unit
+  , cancelRename :: Effect Unit
+  , setRenameName :: (String -> String) -> Effect Unit
+  , commitRename :: String -> Effect Unit
+  , deleteSnippet :: String -> Effect Unit
+  , loadSnippet :: String -> Effect Unit
+  , viewHistory :: CommitInfo -> Effect Unit
+  , restoreViewedVersion :: Effect Unit
+  }
+
+snippetDrawer :: SnippetDrawerProps -> JSX
+snippetDrawer props =
+  let
+    historyMode =
+      props.viewingVersion /= Nothing
+
+    editDisabled =
+      props.busy || historyMode
+
+    snippetCount =
+      Array.length props.snippets
+  in
+    M.drawer
+      { variant: "permanent"
+      , sx:
+          { width: drawerWidth
+          , flexShrink: 0
+          , "& .MuiDrawer-paper":
+              { width: drawerWidth
+              , boxSizing: "border-box"
+              , position: "relative"
+              , height: "100vh"
+              , overflow: "hidden"
+              }
+          }
+      }
+      [ M.box
+          { sx:
+              { height: "100%"
+              , display: "flex"
+              , flexDirection: "column"
+              , borderRight: "1px solid"
+              , borderColor: "divider"
+              }
+          }
+          [ M.box { sx: { p: 1.5 } }
+              [ M.stack { direction: "row", spacing: 1, alignItems: "center" }
+                  [ M.textField
+                      { label: "Quick add snippet"
+                      , size: "small"
+                      , value: props.quickName
+                      , onChange: M.onValueChange (\next -> props.setQuickName (const next))
+                      , onKeyDown:
+                          handler DOMEvents.key \pressed ->
+                            when (pressed == Just "Enter") props.createQuickSnippet
+                      , disabled: props.busy
+                      , sx: { flexGrow: 1 }
+                      , inputProps: { "aria-label": "Quick add snippet" }
+                      }
+                  , M.tooltip { title: "Add snippet" }
+                      [ M.iconButton
+                          { "aria-label": "Add snippet"
+                          , color: "primary"
+                          , onClick: props.createQuickSnippet
+                          , disabled: props.busy || String.null (String.trim props.quickName)
+                          , sx: { width: 40, height: 40, flex: "0 0 auto" }
+                          }
+                          [ M.addIcon { fontSize: "small" } ]
+                      ]
+                  ]
+              , M.button
+                  { variant: "text"
+                  , size: "small"
+                  , onClick:
+                      handler
+                        ( merge
+                            { clientX: DOMEvents.clientX
+                            , clientY: DOMEvents.clientY
+                            }
+                        )
+                        props.openNewFromMenu
+                  , disabled: props.busy
+                  , sx: { mt: 1, px: 0.5, justifyContent: "flex-start" }
+                  }
+                  [ R.text "new from..." ]
+              , DialogControls.menu
+                  { open: props.newFromMenu /= Nothing
+                  , onClose: handler_ props.closeNewFromMenu
+                  , anchorReference: "anchorPosition"
+                  , anchorPosition: fromMaybe { top: 0.0, left: 0.0 } props.newFromMenu
+                  , "MenuListProps": { "aria-label": "New snippet sources" }
+                  }
+                  [ DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "copy") } [ R.text "Copy existing" ]
+                  , DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "file") } [ R.text "Local file" ]
+                  , DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "url") } [ R.text "URL" ]
+                  ]
+              , if String.null props.quickError then
+                  mempty
+                else
+                  M.typography { variant: "caption", sx: { color: "error.main", display: "block", mt: 0.75 } } [ R.text props.quickError ]
+              ]
+          , M.divider {}
+          , M.box { sx: { flex: "1 1 auto", minHeight: 0, overflow: "auto" } }
+              [ M.list
+                  { dense: true
+                  , "aria-label": "Snippets"
+                  , sx: { py: 0.5 }
+                  }
+                  ( map
+                      ( \name ->
+                          keyed ("snippet-" <> name)
+                            (snippetListItem props editDisabled snippetCount name)
+                      )
+                      props.snippets
+                  )
+              ]
+          , M.divider {}
+          , M.box { sx: { p: 2, flex: "0 0 auto" } }
+              ( [ M.typography { variant: "subtitle2", sx: { mb: 1, fontWeight: 700 } } [ R.text "History" ] ]
+                  <> historyItems props.history props.viewingVersion props.busy props.viewHistory
+                  <> restoreButton props.viewingVersion props.busy props.restoreViewedVersion
+              )
+          ]
+      ]
+
+snippetListItem :: SnippetDrawerProps -> Boolean -> Int -> String -> JSX
+snippetListItem props editDisabled snippetCount name =
+  case props.renamingSnippet of
+    Just editing
+      | editing == name -> renameSnippetRow props name editDisabled
+    _ -> snippetRow props editDisabled snippetCount name
+
+snippetRow :: SnippetDrawerProps -> Boolean -> Int -> String -> JSX
+snippetRow props editDisabled snippetCount name =
+  let
+    active =
+      props.activeSnippet == Just name
+  in
+    M.listItem { disablePadding: true }
+      [ M.box
+          { sx:
+              { width: "100%"
+              , display: "flex"
+              , alignItems: "center"
+              , "&:hover .snippet-actions, &:focus-within .snippet-actions":
+                  { opacity: 1.0
+                  }
+              }
+          }
+          [ M.listItemButton
+              { selected: active
+              , onClick: props.loadSnippet name
+              , disabled: props.busy
+              , "data-testid": "snippet-row"
+              , sx: { minWidth: 0, flexGrow: 1, py: 1 }
+              }
+              [ M.listItemText
+                  { primary: name
+                  , secondary:
+                      if active then
+                        props.savedLabel
+                      else
+                        ""
+                  , primaryTypographyProps: { noWrap: true }
+                  }
+              ]
+          , M.stack
+              { className: "snippet-actions"
+              , direction: "row"
+              , spacing: 0.25
+              , sx:
+                  { flex: "0 0 auto"
+                  , px: 0.5
+                  , opacity:
+                      if active then
+                        1.0
+                      else
+                        0.0
+                  , transition: "opacity 120ms ease"
+                  }
+              }
+              [ M.tooltip { title: "Rename" }
+                  [ M.iconButton
+                      { size: "small"
+                      , "aria-label": "Rename " <> name
+                      , onClick: props.startRename name
+                      , disabled: editDisabled
+                      , sx: { width: 30, height: 30 }
+                      }
+                      [ M.editIcon { fontSize: "small" } ]
+                  ]
+              , M.tooltip { title: "Delete" }
+                  [ M.iconButton
+                      { size: "small"
+                      , "aria-label": "Delete " <> name
+                      , onClick: props.deleteSnippet name
+                      , disabled: editDisabled || snippetCount <= 1
+                      , sx: { width: 30, height: 30 }
+                      }
+                      [ M.deleteIcon { fontSize: "small" } ]
+                  ]
+              ]
+          ]
+      ]
+
+renameSnippetRow :: SnippetDrawerProps -> String -> Boolean -> JSX
+renameSnippetRow props name editDisabled =
+  M.listItem { disablePadding: true }
+    [ M.box { sx: { width: "100%", p: 1 } }
+        [ M.stack { direction: "row", spacing: 0.5, alignItems: "center" }
+            [ M.textField
+                { label: "Rename snippet"
+                , size: "small"
+                , value: props.renameName
+                , onChange: M.onValueChange (\next -> props.setRenameName (const next))
+                , onKeyDown:
+                    handler DOMEvents.key \pressed ->
+                      case pressed of
+                        Just "Enter" -> props.commitRename name
+                        Just "Escape" -> props.cancelRename
+                        _ -> pure unit
+                , autoFocus: true
+                , disabled: editDisabled
+                , sx: { flexGrow: 1 }
+                , inputProps: { "aria-label": "Rename snippet" }
                 }
-                [ M.addIcon { fontSize: "small" }, R.text "New snippet" ]
+            , M.tooltip { title: "Save" }
+                [ M.iconButton
+                    { size: "small"
+                    , "aria-label": "Save rename"
+                    , onClick: props.commitRename name
+                    , disabled: editDisabled
+                    }
+                    [ M.saveIcon { fontSize: "small" } ]
+                ]
+            , M.tooltip { title: "Cancel" }
+                [ M.iconButton
+                    { size: "small"
+                    , "aria-label": "Cancel rename"
+                    , onClick: props.cancelRename
+                    , disabled: props.busy
+                    }
+                    [ M.closeIcon { fontSize: "small" } ]
+                ]
             ]
-        , M.divider {}
-        , M.box { sx: { flex: "1 1 auto", minHeight: 0, overflow: "auto" } }
-            [ M.list
-                { dense: true
-                , "aria-label": "Snippets"
-                }
-                ( map
-                    ( \name ->
-                        keyed ("snippet-" <> name)
-                          ( M.listItem { disablePadding: true }
-                              [ M.listItemButton
-                                  { selected: activeSnippet == Just name
-                                  , onClick: loadSnippet name
-                                  , disabled: busy
-                                  }
-                                  [ M.listItemText
-                                      { primary: name
-                                      , secondary:
-                                          if activeSnippet == Just name then
-                                            savedLabel
-                                          else
-                                            ""
-                                      }
-                                  ]
-                              ]
-                          )
-                    )
-                    snippets
-                )
-            ]
-        , M.divider {}
-        , M.box { sx: { p: 2, flex: "0 0 auto" } }
-            ( [ M.typography { variant: "subtitle2", sx: { mb: 1, fontWeight: 700 } } [ R.text "History" ] ]
-                <> historyItems history viewingVersion busy viewHistory
-                <> restoreButton viewingVersion busy restoreViewedVersion
-            )
+        , if String.null props.renameError then
+            mempty
+          else
+            M.typography { variant: "caption", sx: { color: "error.main", display: "block", mt: 0.5 } } [ R.text props.renameError ]
         ]
     ]
 
