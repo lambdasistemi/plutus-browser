@@ -52,6 +52,12 @@ defaultAutoEvalDebounceMs = 350
 defaultAutoCommitDebounceMs :: Int
 defaultAutoCommitDebounceMs = 1500
 
+defaultIndentWidth :: Int
+defaultIndentWidth = 2
+
+indentWidths :: Array Int
+indentWidths = [ 2, 4, 8 ]
+
 drawerWidth :: Int
 drawerWidth = 304
 
@@ -135,6 +141,10 @@ exampleProgram name =
     Just example -> example.program
     Nothing -> defaultProgram
 
+formatExampleProgram :: Int -> String -> String
+formatExampleProgram indentWidth name =
+  formatUplc indentWidth (exampleProgram name)
+
 exampleCopyName :: Array String -> String -> String
 exampleCopyName snippets exampleName =
   let
@@ -186,8 +196,8 @@ validateNewName existing rawName
 
 mkApp :: Effect (Unit -> JSX)
 mkApp = component "UplcApp" \_ -> React.do
-  program /\ setProgram <- useState defaultProgram
-  persistedProgram /\ setPersistedProgram <- useState defaultProgram
+  program /\ setProgram <- useState (formatUplc defaultIndentWidth defaultProgram)
+  persistedProgram /\ setPersistedProgram <- useState (formatUplc defaultIndentWidth defaultProgram)
   repo /\ setRepo <- useState (Nothing :: Maybe BrowserRepo)
   snippets /\ setSnippets <- useState ([] :: Array String)
   activeDocument /\ setActiveDocument <- useState defaultActiveDocument
@@ -196,6 +206,7 @@ mkApp = component "UplcApp" \_ -> React.do
   budget /\ setBudget <- useState false
   auto /\ setAuto <- useState true
   autoFormat /\ setAutoFormat <- useState false
+  indentWidth /\ setIndentWidth <- useState defaultIndentWidth
   autoEvalDebounceMs /\ setAutoEvalDebounceMs <- useState defaultAutoEvalDebounceMs
   autoCommitDebounceMs /\ setAutoCommitDebounceMs <- useState defaultAutoCommitDebounceMs
   running /\ setRunning <- useState false
@@ -232,11 +243,14 @@ mkApp = component "UplcApp" \_ -> React.do
     activeExample =
       activeExampleName activeDocument
 
+    exampleDirty =
+      program /= persistedProgram && viewingVersion == Nothing && activeExample /= Nothing
+
     reservedSnippetNames =
       snippets <> map _.name examples
 
     readOnlyMode =
-      viewingVersion /= Nothing || activeExample /= Nothing
+      viewingVersion /= Nothing
 
     savedLabel =
       case viewingVersion of
@@ -312,7 +326,7 @@ mkApp = component "UplcApp" \_ -> React.do
                     _ <- BrowserGit.writeAndCommit currentRepo (snippetPath currentName) program ("edit " <> currentName)
                     pure unit
                 Nothing -> pure unit
-              pure example.program
+              pure (formatUplc indentWidth example.program)
             liftEffect do
               setStoreBusy (const false)
               case result of
@@ -332,10 +346,12 @@ mkApp = component "UplcApp" \_ -> React.do
         Just currentRepo, Just example -> do
           let
             nextName = exampleCopyName snippets example.name
+
+            snippetContent = program
           setStoreBusy (const true)
           launchAff_ do
             result <- attempt do
-              _ <- BrowserGit.writeAndCommit currentRepo (snippetPath nextName) example.program ("create " <> nextName)
+              _ <- BrowserGit.writeAndCommit currentRepo (snippetPath nextName) snippetContent ("create " <> nextName)
               names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
               nextHistory <- BrowserGit.log currentRepo (snippetPath nextName)
               pure { names, nextHistory }
@@ -346,8 +362,8 @@ mkApp = component "UplcApp" \_ -> React.do
                 Right created -> do
                   setSnippets (const created.names)
                   setActiveDocument (const (ActiveSnippet nextName))
-                  setProgram (const example.program)
-                  setPersistedProgram (const example.program)
+                  setProgram (const snippetContent)
+                  setPersistedProgram (const snippetContent)
                   setHistory (const created.nextHistory)
                   setViewingVersion (const Nothing)
                   setNewCopySource (const nextName)
@@ -517,7 +533,7 @@ mkApp = component "UplcApp" \_ -> React.do
                     nextContent <-
                       case nextActive of
                         ActiveSnippet active -> BrowserGit.readFile currentRepo (snippetPath active)
-                        ActiveExample active -> pure (exampleProgram active)
+                        ActiveExample active -> pure (formatExampleProgram indentWidth active)
                     nextHistory <-
                       case nextActive of
                         ActiveSnippet active -> BrowserGit.log currentRepo (snippetPath active)
@@ -558,7 +574,7 @@ mkApp = component "UplcApp" \_ -> React.do
               nextContent <-
                 case nextActive of
                   ActiveSnippet active -> BrowserGit.readFile currentRepo (snippetPath active)
-                  ActiveExample active -> pure (exampleProgram active)
+                  ActiveExample active -> pure (formatExampleProgram indentWidth active)
               nextHistory <-
                 case nextActive of
                   ActiveSnippet active -> BrowserGit.log currentRepo (snippetPath active)
@@ -665,7 +681,7 @@ mkApp = component "UplcApp" \_ -> React.do
     formatProgram :: Effect Unit
     formatProgram =
       when (not readOnlyMode) do
-        setProgram (const (formatUplc program))
+        setProgram (const (formatUplc indentWidth program))
 
     onEditorBlur :: Effect Unit
     onEditorBlur =
@@ -678,7 +694,7 @@ mkApp = component "UplcApp" \_ -> React.do
         "text.primary"
 
   useEffectOnce do
-    loadInitialSnippets defaultProgram
+    loadInitialSnippets (formatUplc indentWidth defaultProgram)
       (setStoreBusy (const false))
       ( \state -> do
           let
@@ -729,6 +745,7 @@ mkApp = component "UplcApp" \_ -> React.do
                 , snippets
                 , activeDocument
                 , activeSnippet
+                , exampleDirty
                 , savedLabel
                 , history
                 , viewingVersion
@@ -780,11 +797,13 @@ mkApp = component "UplcApp" \_ -> React.do
                         budget
                         auto
                         autoFormat
+                        indentWidth
                         autoEvalDebounceMs
                         autoCommitDebounceMs
                         setBudget
                         setAuto
                         setAutoFormat
+                        setIndentWidth
                         setAutoEvalDebounceMs
                         setAutoCommitDebounceMs
                         evaluate
@@ -837,6 +856,7 @@ type SnippetDrawerProps =
   , snippets :: Array String
   , activeDocument :: ActiveDocument
   , activeSnippet :: Maybe String
+  , exampleDirty :: Boolean
   , savedLabel :: String
   , history :: Array CommitInfo
   , viewingVersion :: Maybe CommitInfo
@@ -1165,7 +1185,10 @@ exampleRow props example =
               { primary: example.name
               , secondary:
                   if active then
-                    "read-only example"
+                    if props.exampleDirty then
+                      "edited example"
+                    else
+                      "example"
                   else
                     ""
               , primaryTypographyProps: { noWrap: true }
@@ -1434,9 +1457,11 @@ controls
   -> Boolean
   -> Int
   -> Int
+  -> Int
   -> ((Boolean -> Boolean) -> Effect Unit)
   -> ((Boolean -> Boolean) -> Effect Unit)
   -> ((Boolean -> Boolean) -> Effect Unit)
+  -> ((Int -> Int) -> Effect Unit)
   -> ((Int -> Int) -> Effect Unit)
   -> ((Int -> Int) -> Effect Unit)
   -> Effect Unit
@@ -1444,7 +1469,7 @@ controls
   -> String
   -> Boolean
   -> JSX
-controls running budget auto autoFormat autoEvalDebounceMs autoCommitDebounceMs setBudget setAuto setAutoFormat setAutoEvalDebounceMs setAutoCommitDebounceMs evaluate formatProgram status historyMode =
+controls running budget auto autoFormat indentWidth autoEvalDebounceMs autoCommitDebounceMs setBudget setAuto setAutoFormat setIndentWidth setAutoEvalDebounceMs setAutoCommitDebounceMs evaluate formatProgram status historyMode =
   M.stack
     { direction: "row"
     , spacing: 2
@@ -1457,6 +1482,7 @@ controls running budget auto autoFormat autoEvalDebounceMs autoCommitDebounceMs 
         , disabled: running || historyMode
         }
         [ M.editIcon { fontSize: "small" }, R.text "Format" ]
+    , indentField indentWidth setIndentWidth
     , toggle "auto-format" autoFormat (\checked -> setAutoFormat (const checked)) "auto format"
     , toggle "budget" budget (\checked -> setBudget (const checked)) "show budget (-c)"
     , toggle "auto" auto (\checked -> setAuto (const checked)) "auto evaluate"
@@ -1475,6 +1501,34 @@ controls running budget auto autoFormat autoEvalDebounceMs autoCommitDebounceMs 
         }
         [ R.text status ]
     ]
+
+indentField :: Int -> ((Int -> Int) -> Effect Unit) -> JSX
+indentField value setValue =
+  DialogControls.selectField
+    { id: "indent-width"
+    , label: "Indentation"
+    , value: show value
+    , onChange:
+        handler DOMEvents.targetValue \next ->
+          case next of
+            Just raw -> setIndentWidthFromString setValue raw
+            Nothing -> pure unit
+    , size: "small"
+    , sx: { width: 136, flex: "0 0 136px" }
+    }
+    ( map
+        ( \width ->
+            DialogControls.menuItem { value: show width } [ R.text (show width <> " spaces") ]
+        )
+        indentWidths
+    )
+
+setIndentWidthFromString :: ((Int -> Int) -> Effect Unit) -> String -> Effect Unit
+setIndentWidthFromString setValue raw =
+  case Int.fromString (String.trim raw) of
+    Just next
+      | Array.elem next indentWidths -> setValue (const next)
+    _ -> pure unit
 
 debounceField :: String -> String -> Int -> ((Int -> Int) -> Effect Unit) -> JSX
 debounceField label ariaLabel value setValue =
