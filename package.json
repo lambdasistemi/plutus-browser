@@ -1,0 +1,40 @@
+{
+  "name": "plutus-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser UI for the wasm32 Plutus evaluator",
+  "scripts": {
+    "prepare:wasm": "mkdir -p src/assets && curl -fsSL -o src/assets/uplc.wasm https://github.com/lambdasistemi/plutus/releases/download/1.65.0.0-wasm32.1/uplc.wasm",
+    "clean": "rm -rf dist",
+    "copy:index": "cp index.html dist/index.html",
+    "build:deps": "mkdir -p dist && esbuild src/bootstrap.js --bundle --format=iife --platform=browser --outfile=dist/deps.js --loader:.wasm=binary --minify",
+    "build:ps": "spago bundle --offline --module Main --outfile dist/index.ps.js",
+    "build:concat": "cat dist/deps.js dist/index.ps.js > dist/index.js && rm dist/deps.js dist/index.ps.js",
+    "build:inside": "npm run clean && npm run build:deps && npm run build:ps && npm run build:concat && npm run copy:index",
+    "build": "npm run prepare:wasm && npm run build:inside",
+    "serve": "node scripts/serve-dist.mjs 4173 dist",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2",
+    "@codemirror/language": "6.12.3",
+    "@codemirror/state": "6.6.0",
+    "@codemirror/view": "6.43.1",
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@isomorphic-git/lightning-fs": "4.6.2",
+    "@lezer/highlight": "1.2.3",
+    "@mui/icons-material": "5.18.0",
+    "@mui/material": "5.18.0",
+    "buffer": "6.0.3",
+    "codemirror": "6.0.2",
+    "isomorphic-git": "1.38.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "esbuild": "0.27.7"
+  }
+}

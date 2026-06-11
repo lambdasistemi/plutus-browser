@@ -1,0 +1,17 @@
+node_modules/
+.spago/
+output/
+result
+result-*
+playwright-report/
+test-results/
+
+dist/*
+!dist/
+!dist/index.html
+
+src/assets/*
+!src/assets/
+!src/assets/.gitkeep
+
+.llm/

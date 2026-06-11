@@ -1,0 +1,47 @@
+package:
+  name: plutus-browser
+  dependencies:
+    - aff
+    - aff-promise
+    - arrays
+    - browser-git
+    - codemirror
+    - console
+    - effect
+    - either
+    - maybe
+    - mui
+    - prelude
+    - react-basic
+    - react-basic-dom
+    - react-basic-hooks
+    - strings
+    - wasi-runner
+    - web-dom
+    - web-html
+  bundle:
+    module: Main
+    outfile: dist/index.ps.js
+    platform: browser
+    type: app
+
+workspace:
+  packageSet:
+    registry: 72.1.0
+  extraPackages:
+    wasi-runner:
+      git: https://github.com/lambdasistemi/purescript-spa-kit.git
+      ref: 1fe8673a5226d3992af1eb991267f4986d674ed5
+      subdir: wasi-runner
+    mui:
+      git: https://github.com/lambdasistemi/purescript-spa-kit.git
+      ref: 1fe8673a5226d3992af1eb991267f4986d674ed5
+      subdir: mui
+    codemirror:
+      git: https://github.com/lambdasistemi/purescript-spa-kit.git
+      ref: 1fe8673a5226d3992af1eb991267f4986d674ed5
+      subdir: codemirror
+    browser-git:
+      git: https://github.com/lambdasistemi/purescript-spa-kit.git
+      ref: 1fe8673a5226d3992af1eb991267f4986d674ed5
+      subdir: browser-git

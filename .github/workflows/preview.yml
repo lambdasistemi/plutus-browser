@@ -1,0 +1,40 @@
+name: PR Preview
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    if: github.event.action != 'closed'
+    runs-on: nixos
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/cachix-action@v17
+        with:
+          name: paolino
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build site
+        run: nix build --quiet
+      - uses: paolino/dev-assets/static-preview@main
+        with:
+          path: result
+
+  cleanup:
+    name: Remove PR Preview
+    if: github.event.action == 'closed'
+    runs-on: nixos
+    steps:
+      - uses: paolino/dev-assets/static-preview@main
+        with:
+          mode: cleanup
