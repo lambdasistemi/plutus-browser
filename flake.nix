@@ -97,6 +97,7 @@
               pkgs.esbuild
               pkgs.nodejs_22
               pkgs.just
+              pkgs.curl
               pkgs.python3
               pkgs.chromium
             ];
