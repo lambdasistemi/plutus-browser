@@ -1,8 +1,9 @@
-export const formatUplc = (source) => {
+export const formatUplc = (indentWidth) => (source) => {
   const tokens = tokenize(source);
   const lines = [];
   let current = "";
   let depth = 0;
+  const step = normalizedIndentWidth(indentWidth);
 
   const flush = () => {
     const text = current.trimEnd();
@@ -12,35 +13,35 @@ export const formatUplc = (source) => {
 
   for (const token of tokens) {
     if (token === ")" || token === "]") {
-      if (current.trim().length > 0 && current.trim() !== indent(depth)) {
+      if (current.trim().length > 0 && current.trim() !== indent(depth, step)) {
         flush();
       }
       depth = Math.max(0, depth - 1);
-      current = indent(depth) + token;
+      current = indent(depth, step) + token;
       flush();
       continue;
     }
 
     if (token === "(" || token === "[") {
       if (current.trim().length === 0) {
-        current = indent(depth) + token;
+        current = indent(depth, step) + token;
       } else if ((current + " " + token).length <= 82) {
         current += " " + token;
       } else {
         flush();
-        current = indent(depth) + token;
+        current = indent(depth, step) + token;
       }
       depth += 1;
       continue;
     }
 
     if (current.trim().length === 0) {
-      current = indent(depth) + token;
+      current = indent(depth, step) + token;
     } else if ((current + " " + token).length <= 82) {
       current += " " + token;
     } else {
       flush();
-      current = indent(depth) + token;
+      current = indent(depth, step) + token;
     }
   }
 
@@ -93,6 +94,10 @@ function tokenize(source) {
   return tokens;
 }
 
-function indent(depth) {
-  return "  ".repeat(Math.max(0, depth));
+function normalizedIndentWidth(indentWidth) {
+  return [2, 4, 8].includes(indentWidth) ? indentWidth : 2;
+}
+
+function indent(depth, indentWidth) {
+  return " ".repeat(Math.max(0, depth) * indentWidth);
 }

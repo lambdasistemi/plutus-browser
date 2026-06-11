@@ -58,7 +58,19 @@ async function waitForEditCommit(page, name) {
   ).toBeVisible({ timeout: 8_000 });
 }
 
-test("shows read-only examples and can save them as snippets", async ({ page }) => {
+async function editorLines(page) {
+  return page.locator(".cm-content .cm-line").evaluateAll((lines) =>
+    lines.map((line) => line.textContent ?? ""),
+  );
+}
+
+async function expectEditorIndent(page, spaces) {
+  const lines = (await editorLines(page)).filter((line) => line.trim().length > 0);
+  expect(lines.length).toBeGreaterThan(1);
+  expect(lines.some((line) => line.search(/\S/) === spaces)).toBe(true);
+}
+
+test("loads editable formatted examples and saves edits as snippets", async ({ page }) => {
   const editor = page.getByLabel("UPLC program");
   const output = page.locator("#output");
 
@@ -87,21 +99,38 @@ test("shows read-only examples and can save them as snippets", async ({ page }) 
   await expect(exampleRows(page)).toHaveCount(exampleCount);
   await exampleButton(page, factorialExampleName).click();
   await expect(editor).toContainText("equalsInteger");
-  await expect(page.getByText("read-only example")).toBeVisible();
+  await expectEditorIndent(page, 2);
+
+  await chooseSelectOption(page, "Indentation", "4 spaces");
+  await page.getByRole("button", { name: "Format" }).click();
+  await expectEditorIndent(page, 4);
+
+  await editor.fill(addIntegerProgram);
+  await page.getByRole("button", { name: "Format" }).click();
+  await expect(editor).toContainText("addInteger");
+  await expect(page.getByText("edited example")).toBeVisible();
   await expect(page.getByRole("button", { name: "Save as my snippet" })).toBeVisible();
 
   await page.getByRole("button", { name: "Evaluate" }).click();
-  await expect(output).toContainText("(con integer 120)");
+  await expect(output).toContainText("(con integer 42)");
 
   await page.getByRole("button", { name: "Save as my snippet" }).click();
   const savedName = `${factorialExampleName} copy`;
   await expect(snippetButton(page, savedName)).toBeVisible();
   await expect(snippetRows(page)).toHaveCount(1);
+  await expect(editor).toContainText("addInteger");
+
+  await exampleButton(page, factorialExampleName).click();
+  await expect(editor).toContainText("equalsInteger");
+  await expect(editor).not.toContainText("addInteger");
+
+  await snippetButton(page, savedName).click();
+  await expect(editor).toContainText("addInteger");
 
   const commitDelay = page.getByLabel("auto commit debounce milliseconds");
   await commitDelay.fill("100");
   await expect(commitDelay).toHaveValue("100");
-  await editor.fill(addIntegerProgram);
+  await editor.fill(subtractProgram);
   await waitForEditCommit(page, savedName);
 
   await page.reload();
@@ -109,7 +138,7 @@ test("shows read-only examples and can save them as snippets", async ({ page }) 
   await expect(exampleRows(page)).toHaveCount(exampleCount);
   await expect(snippetButton(page, savedName)).toBeVisible();
   await snippetButton(page, savedName).click();
-  await expect(editor).toContainText("addInteger");
+  await expect(editor).toContainText("subtractInteger");
 });
 
 test("shows examples alongside a pre-populated snippet store", async ({ page }) => {
