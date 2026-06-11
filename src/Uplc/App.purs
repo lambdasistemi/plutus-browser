@@ -11,7 +11,6 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodeUnits as CodeUnits
 import Data.String.Common as String
 import Data.String.Pattern (Pattern(..), Replacement(..))
-import Data.Traversable (traverse_)
 import Effect (Effect)
 import Effect.Aff (attempt, launchAff_)
 import Effect.Class (liftEffect)
@@ -86,15 +85,75 @@ shortTimestamp stamp =
 type SnippetState =
   { repo :: BrowserRepo
   , snippets :: Array String
-  , active :: String
+  , active :: ActiveDocument
   , content :: String
   , history :: Array CommitInfo
   }
+
+type ExampleItem =
+  { name :: String
+  , program :: String
+  }
+
+data ActiveDocument
+  = ActiveSnippet String
+  | ActiveExample String
+
+derive instance eqActiveDocument :: Eq ActiveDocument
 
 type MenuPosition =
   { top :: Number
   , left :: Number
   }
+
+activeDocumentName :: ActiveDocument -> String
+activeDocumentName = case _ of
+  ActiveSnippet name -> name
+  ActiveExample name -> name
+
+activeSnippetName :: ActiveDocument -> Maybe String
+activeSnippetName = case _ of
+  ActiveSnippet name -> Just name
+  ActiveExample _ -> Nothing
+
+activeExampleName :: ActiveDocument -> Maybe String
+activeExampleName = case _ of
+  ActiveExample name -> Just name
+  ActiveSnippet _ -> Nothing
+
+defaultActiveDocument :: ActiveDocument
+defaultActiveDocument =
+  ActiveExample defaultSnippetName
+
+findExample :: String -> Maybe ExampleItem
+findExample name =
+  Array.find (\example -> example.name == name) examples
+
+exampleProgram :: String -> String
+exampleProgram name =
+  case findExample name of
+    Just example -> example.program
+    Nothing -> defaultProgram
+
+exampleCopyName :: Array String -> String -> String
+exampleCopyName snippets exampleName =
+  let
+    candidate index =
+      if index == 0 then
+        exampleName <> " copy"
+      else
+        exampleName <> " copy " <> show (index + 1)
+
+    findAvailable index =
+      let
+        name = candidate index
+      in
+        if Array.elem name snippets then
+          findAvailable (index + 1)
+        else
+          name
+  in
+    findAvailable 0
 
 loadInitialSnippets :: String -> Effect Unit -> (SnippetState -> Effect Unit) -> (String -> Effect Unit) -> Effect Unit
 loadInitialSnippets fallback setBusy applyState reportError =
@@ -104,25 +163,13 @@ loadInitialSnippets fallback setBusy applyState reportError =
       files <- BrowserGit.listFiles repo
       let
         existingNames = snippetNamesFromFiles files
-      names <-
-        if Array.null existingNames then do
-          if Array.null examples then do
-            _ <- BrowserGit.writeAndCommit repo (snippetPath defaultSnippetName) fallback ("create " <> defaultSnippetName)
-            pure [ defaultSnippetName ]
-          else do
-            traverse_
-              ( \example ->
-                  BrowserGit.writeAndCommit repo (snippetPath example.name) example.program ("create " <> example.name)
-              )
-              examples
-            pure (map _.name examples)
-        else
-          pure existingNames
-      let
-        active = fromMaybe defaultSnippetName (Array.head names)
-      content <- BrowserGit.readFile repo (snippetPath active)
-      history <- BrowserGit.log repo (snippetPath active)
-      pure { repo, snippets: names, active, content, history }
+      case Array.head existingNames of
+        Just active -> do
+          content <- BrowserGit.readFile repo (snippetPath active)
+          history <- BrowserGit.log repo (snippetPath active)
+          pure { repo, snippets: existingNames, active: ActiveSnippet active, content, history }
+        Nothing ->
+          pure { repo, snippets: existingNames, active: defaultActiveDocument, content: fallback, history: [] }
     liftEffect do
       setBusy
       case loaded of
@@ -143,7 +190,7 @@ mkApp = component "UplcApp" \_ -> React.do
   persistedProgram /\ setPersistedProgram <- useState defaultProgram
   repo /\ setRepo <- useState (Nothing :: Maybe BrowserRepo)
   snippets /\ setSnippets <- useState ([] :: Array String)
-  activeSnippet /\ setActiveSnippet <- useState (Nothing :: Maybe String)
+  activeDocument /\ setActiveDocument <- useState defaultActiveDocument
   history /\ setHistory <- useState ([] :: Array CommitInfo)
   viewingVersion /\ setViewingVersion <- useState (Nothing :: Maybe CommitInfo)
   budget /\ setBudget <- useState false
@@ -174,10 +221,22 @@ mkApp = component "UplcApp" \_ -> React.do
 
   let
     dirty =
-      program /= persistedProgram && viewingVersion == Nothing
+      program /= persistedProgram && viewingVersion == Nothing && activeSnippetName activeDocument /= Nothing
 
     activeName =
-      fromMaybe "No snippet" activeSnippet
+      activeDocumentName activeDocument
+
+    activeSnippet =
+      activeSnippetName activeDocument
+
+    activeExample =
+      activeExampleName activeDocument
+
+    reservedSnippetNames =
+      snippets <> map _.name examples
+
+    readOnlyMode =
+      viewingVersion /= Nothing || activeExample /= Nothing
 
     savedLabel =
       case viewingVersion of
@@ -213,14 +272,17 @@ mkApp = component "UplcApp" \_ -> React.do
 
     loadSnippet :: String -> Effect Unit
     loadSnippet name =
-      case repo, activeSnippet of
-        Just currentRepo, Just currentName -> do
+      case repo of
+        Just currentRepo -> do
           setStoreBusy (const true)
           launchAff_ do
             result <- attempt do
-              when (program /= persistedProgram && viewingVersion == Nothing) do
-                _ <- BrowserGit.writeAndCommit currentRepo (snippetPath currentName) program ("edit " <> currentName)
-                pure unit
+              case activeSnippet of
+                Just currentName ->
+                  when (program /= persistedProgram && viewingVersion == Nothing) do
+                    _ <- BrowserGit.writeAndCommit currentRepo (snippetPath currentName) program ("edit " <> currentName)
+                    pure unit
+                Nothing -> pure unit
               nextContent <- BrowserGit.readFile currentRepo (snippetPath name)
               nextHistory <- BrowserGit.log currentRepo (snippetPath name)
               pure { nextContent, nextHistory }
@@ -229,12 +291,67 @@ mkApp = component "UplcApp" \_ -> React.do
               case result of
                 Left err -> setStatus (const ("Snippet switch failed: " <> message err))
                 Right loaded -> do
-                  setActiveSnippet (const (Just name))
+                  setActiveDocument (const (ActiveSnippet name))
                   setProgram (const loaded.nextContent)
                   setPersistedProgram (const loaded.nextContent)
                   setHistory (const loaded.nextHistory)
                   setViewingVersion (const Nothing)
                   setStatus (const ("Loaded " <> name))
+        _ -> pure unit
+
+    loadExample :: String -> Effect Unit
+    loadExample name =
+      case repo, findExample name of
+        Just currentRepo, Just example -> do
+          setStoreBusy (const true)
+          launchAff_ do
+            result <- attempt do
+              case activeSnippet of
+                Just currentName ->
+                  when (program /= persistedProgram && viewingVersion == Nothing) do
+                    _ <- BrowserGit.writeAndCommit currentRepo (snippetPath currentName) program ("edit " <> currentName)
+                    pure unit
+                Nothing -> pure unit
+              pure example.program
+            liftEffect do
+              setStoreBusy (const false)
+              case result of
+                Left err -> setStatus (const ("Example load failed: " <> message err))
+                Right nextContent -> do
+                  setActiveDocument (const (ActiveExample name))
+                  setProgram (const nextContent)
+                  setPersistedProgram (const nextContent)
+                  setHistory (const [])
+                  setViewingVersion (const Nothing)
+                  setStatus (const ("Loaded example " <> name))
+        _, _ -> pure unit
+
+    saveExampleAsSnippet :: String -> Effect Unit
+    saveExampleAsSnippet name =
+      case repo, findExample name of
+        Just currentRepo, Just example -> do
+          let
+            nextName = exampleCopyName snippets example.name
+          setStoreBusy (const true)
+          launchAff_ do
+            result <- attempt do
+              _ <- BrowserGit.writeAndCommit currentRepo (snippetPath nextName) example.program ("create " <> nextName)
+              names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
+              nextHistory <- BrowserGit.log currentRepo (snippetPath nextName)
+              pure { names, nextHistory }
+            liftEffect do
+              setStoreBusy (const false)
+              case result of
+                Left err -> setStatus (const ("Save example failed: " <> message err))
+                Right created -> do
+                  setSnippets (const created.names)
+                  setActiveDocument (const (ActiveSnippet nextName))
+                  setProgram (const example.program)
+                  setPersistedProgram (const example.program)
+                  setHistory (const created.nextHistory)
+                  setViewingVersion (const Nothing)
+                  setNewCopySource (const nextName)
+                  setStatus (const ("Saved example as " <> nextName))
         _, _ -> pure unit
 
     viewHistory :: CommitInfo -> Effect Unit
@@ -282,9 +399,14 @@ mkApp = component "UplcApp" \_ -> React.do
 
     resetNewDialog :: Effect Unit
     resetNewDialog = do
+      let
+        copySource =
+          case activeSnippet of
+            Just name -> name
+            Nothing -> fromMaybe defaultSnippetName (Array.head snippets)
       setNewName (const "")
       setNewSource (const "empty")
-      setNewCopySource (const (fromMaybe defaultSnippetName activeSnippet))
+      setNewCopySource (const copySource)
       setNewUrl (const "")
       setNewFileText (const Nothing)
       setNewFileLabel (const "")
@@ -324,7 +446,7 @@ mkApp = component "UplcApp" \_ -> React.do
         Just currentRepo -> do
           let
             name = normaliseName quickName
-          case validateNewName snippets name of
+          case validateNewName reservedSnippetNames name of
             Just err -> setQuickError (const err)
             Nothing -> do
               setStoreBusy (const true)
@@ -341,7 +463,7 @@ mkApp = component "UplcApp" \_ -> React.do
                     Left err -> setQuickError (const ("Create failed: " <> message err))
                     Right created -> do
                       setSnippets (const created.names)
-                      setActiveSnippet (const (Just name))
+                      setActiveDocument (const (ActiveSnippet name))
                       setProgram (const "")
                       setPersistedProgram (const "")
                       setHistory (const created.nextHistory)
@@ -370,7 +492,7 @@ mkApp = component "UplcApp" \_ -> React.do
             nextName = normaliseName renameName
 
             existing =
-              Array.filter (_ /= oldName) snippets
+              Array.filter (_ /= oldName) snippets <> map _.name examples
           if nextName == oldName then
             cancelRename
           else
@@ -389,17 +511,17 @@ mkApp = component "UplcApp" \_ -> React.do
                     let
                       nextActive =
                         if activeSnippet == Just oldName then
-                          Just nextName
+                          ActiveSnippet nextName
                         else
-                          activeSnippet
+                          activeDocument
                     nextContent <-
                       case nextActive of
-                        Just active -> BrowserGit.readFile currentRepo (snippetPath active)
-                        Nothing -> pure ""
+                        ActiveSnippet active -> BrowserGit.readFile currentRepo (snippetPath active)
+                        ActiveExample active -> pure (exampleProgram active)
                     nextHistory <-
                       case nextActive of
-                        Just active -> BrowserGit.log currentRepo (snippetPath active)
-                        Nothing -> pure []
+                        ActiveSnippet active -> BrowserGit.log currentRepo (snippetPath active)
+                        ActiveExample _ -> pure []
                     pure { names, nextActive, nextContent, nextHistory }
                   liftEffect do
                     setStoreBusy (const false)
@@ -407,7 +529,7 @@ mkApp = component "UplcApp" \_ -> React.do
                       Left err -> setRenameError (const ("Rename failed: " <> message err))
                       Right renamed -> do
                         setSnippets (const renamed.names)
-                        setActiveSnippet (const renamed.nextActive)
+                        setActiveDocument (const renamed.nextActive)
                         setProgram (const renamed.nextContent)
                         setPersistedProgram (const renamed.nextContent)
                         setHistory (const renamed.nextHistory)
@@ -419,45 +541,42 @@ mkApp = component "UplcApp" \_ -> React.do
     deleteSnippet name =
       case repo of
         Nothing -> setStatus (const "Snippet store is not ready")
-        Just currentRepo ->
-          if Array.length snippets <= 1 then
-            setStatus (const "Keep at least one snippet")
-          else do
-            setStoreBusy (const true)
-            launchAff_ do
-              result <- attempt do
-                _ <- SnippetStore.deleteAndCommit currentRepo (snippetPath name) ("delete " <> name)
-                names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
-                let
-                  nextActive =
-                    if activeSnippet == Just name then
-                      Array.head names
-                    else
-                      case activeSnippet of
-                        Just active -> Just active
-                        Nothing -> Array.head names
-                nextContent <-
-                  case nextActive of
-                    Just active -> BrowserGit.readFile currentRepo (snippetPath active)
-                    Nothing -> pure ""
-                nextHistory <-
-                  case nextActive of
-                    Just active -> BrowserGit.log currentRepo (snippetPath active)
-                    Nothing -> pure []
-                pure { names, nextActive, nextContent, nextHistory }
-              liftEffect do
-                setStoreBusy (const false)
-                case result of
-                  Left err -> setStatus (const ("Delete failed: " <> message err))
-                  Right deleted -> do
-                    setSnippets (const deleted.names)
-                    setActiveSnippet (const deleted.nextActive)
-                    setProgram (const deleted.nextContent)
-                    setPersistedProgram (const deleted.nextContent)
-                    setHistory (const deleted.nextHistory)
-                    setViewingVersion (const Nothing)
-                    when (renamingSnippet == Just name) cancelRename
-                    setStatus (const ("Deleted " <> name))
+        Just currentRepo -> do
+          setStoreBusy (const true)
+          launchAff_ do
+            result <- attempt do
+              _ <- SnippetStore.deleteAndCommit currentRepo (snippetPath name) ("delete " <> name)
+              names <- snippetNamesFromFiles <$> BrowserGit.listFiles currentRepo
+              let
+                nextActive =
+                  if activeSnippet == Just name then
+                    case Array.head names of
+                      Just active -> ActiveSnippet active
+                      Nothing -> defaultActiveDocument
+                  else
+                    activeDocument
+              nextContent <-
+                case nextActive of
+                  ActiveSnippet active -> BrowserGit.readFile currentRepo (snippetPath active)
+                  ActiveExample active -> pure (exampleProgram active)
+              nextHistory <-
+                case nextActive of
+                  ActiveSnippet active -> BrowserGit.log currentRepo (snippetPath active)
+                  ActiveExample _ -> pure []
+              pure { names, nextActive, nextContent, nextHistory }
+            liftEffect do
+              setStoreBusy (const false)
+              case result of
+                Left err -> setStatus (const ("Delete failed: " <> message err))
+                Right deleted -> do
+                  setSnippets (const deleted.names)
+                  setActiveDocument (const deleted.nextActive)
+                  setProgram (const deleted.nextContent)
+                  setPersistedProgram (const deleted.nextContent)
+                  setHistory (const deleted.nextHistory)
+                  setViewingVersion (const Nothing)
+                  when (renamingSnippet == Just name) cancelRename
+                  setStatus (const ("Deleted " <> name))
 
     readSnippetFile :: SyntheticEvent -> Effect Unit
     readSnippetFile event = do
@@ -477,11 +596,13 @@ mkApp = component "UplcApp" \_ -> React.do
         Just currentRepo -> do
           let
             name = normaliseName newName
-          case validateNewName snippets name of
+          case validateNewName reservedSnippetNames name of
             Just err -> setNewError (const err)
             Nothing ->
               if newSource == "file" && newFileText == Nothing then
                 setNewError (const "Choose a file")
+              else if newSource == "copy" && Array.null snippets then
+                setNewError (const "Choose a snippet to copy")
               else if newSource == "url" && String.null (String.trim newUrl) then
                 setNewError (const "URL required")
               else do
@@ -508,7 +629,7 @@ mkApp = component "UplcApp" \_ -> React.do
                       Left err -> setNewError (const ("Create failed: " <> message err))
                       Right created -> do
                         setSnippets (const created.names)
-                        setActiveSnippet (const (Just name))
+                        setActiveDocument (const (ActiveSnippet name))
                         setProgram (const created.content)
                         setPersistedProgram (const created.content)
                         setHistory (const created.nextHistory)
@@ -543,7 +664,7 @@ mkApp = component "UplcApp" \_ -> React.do
 
     formatProgram :: Effect Unit
     formatProgram =
-      when (viewingVersion == Nothing) do
+      when (not readOnlyMode) do
         setProgram (const (formatUplc program))
 
     onEditorBlur :: Effect Unit
@@ -560,13 +681,18 @@ mkApp = component "UplcApp" \_ -> React.do
     loadInitialSnippets defaultProgram
       (setStoreBusy (const false))
       ( \state -> do
+          let
+            copySource =
+              case activeSnippetName state.active of
+                Just name -> name
+                Nothing -> fromMaybe defaultSnippetName (Array.head state.snippets)
           setRepo (const (Just state.repo))
           setSnippets (const state.snippets)
-          setActiveSnippet (const (Just state.active))
+          setActiveDocument (const state.active)
           setProgram (const state.content)
           setPersistedProgram (const state.content)
           setHistory (const state.history)
-          setNewCopySource (const state.active)
+          setNewCopySource (const copySource)
           setStatus (const ("Snippet store: " <> BrowserGit.storageBackend))
       )
       (setStatus <<< const)
@@ -599,7 +725,9 @@ mkApp = component "UplcApp" \_ -> React.do
                 }
             }
             [ snippetDrawer
-                { snippets
+                { examples
+                , snippets
+                , activeDocument
                 , activeSnippet
                 , savedLabel
                 , history
@@ -622,6 +750,8 @@ mkApp = component "UplcApp" \_ -> React.do
                 , commitRename
                 , deleteSnippet
                 , loadSnippet
+                , loadExample
+                , saveExampleAsSnippet
                 , viewHistory
                 , restoreViewedVersion
                 }
@@ -660,7 +790,7 @@ mkApp = component "UplcApp" \_ -> React.do
                         evaluate
                         formatProgram
                         status
-                        (viewingVersion /= Nothing)
+                        readOnlyMode
                     , M.box
                         { component: "section"
                         , "aria-label": "UPLC evaluator"
@@ -674,10 +804,11 @@ mkApp = component "UplcApp" \_ -> React.do
                             , alignItems: "stretch"
                             }
                         }
-                        [ editorCard activeName program setProgram onEditorBlur (viewingVersion /= Nothing)
+                        [ editorCard activeName program setProgram onEditorBlur readOnlyMode
                         , outputCard output outputColor
                         ]
                     ]
+                , footerCredit
                 ]
             , newSnippetDialog
                 { open: newOpen
@@ -702,7 +833,9 @@ mkApp = component "UplcApp" \_ -> React.do
     )
 
 type SnippetDrawerProps =
-  { snippets :: Array String
+  { examples :: Array ExampleItem
+  , snippets :: Array String
+  , activeDocument :: ActiveDocument
   , activeSnippet :: Maybe String
   , savedLabel :: String
   , history :: Array CommitInfo
@@ -725,6 +858,8 @@ type SnippetDrawerProps =
   , commitRename :: String -> Effect Unit
   , deleteSnippet :: String -> Effect Unit
   , loadSnippet :: String -> Effect Unit
+  , loadExample :: String -> Effect Unit
+  , saveExampleAsSnippet :: String -> Effect Unit
   , viewHistory :: CommitInfo -> Effect Unit
   , restoreViewedVersion :: Effect Unit
   }
@@ -737,9 +872,6 @@ snippetDrawer props =
 
     editDisabled =
       props.busy || historyMode
-
-    snippetCount =
-      Array.length props.snippets
   in
     M.drawer
       { variant: "permanent"
@@ -811,7 +943,11 @@ snippetDrawer props =
                   , anchorPosition: fromMaybe { top: 0.0, left: 0.0 } props.newFromMenu
                   , "MenuListProps": { "aria-label": "New snippet sources" }
                   }
-                  [ DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "copy") } [ R.text "Copy existing" ]
+                  [ DialogControls.menuItem
+                      { onClick: handler_ (props.openNewDialogFrom "copy")
+                      , disabled: Array.null props.snippets
+                      }
+                      [ R.text "Copy existing" ]
                   , DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "file") } [ R.text "Local file" ]
                   , DialogControls.menuItem { onClick: handler_ (props.openNewDialogFrom "url") } [ R.text "URL" ]
                   ]
@@ -822,17 +958,57 @@ snippetDrawer props =
               ]
           , M.divider {}
           , M.box { sx: { flex: "1 1 auto", minHeight: 0, overflow: "auto" } }
-              [ M.list
-                  { dense: true
-                  , "aria-label": "Snippets"
-                  , sx: { py: 0.5 }
-                  }
-                  ( map
-                      ( \name ->
-                          keyed ("snippet-" <> name)
-                            (snippetListItem props editDisabled snippetCount name)
-                      )
-                      props.snippets
+              [ M.box { component: "section", "aria-labelledby": "my-snippets-heading", sx: { py: 0.5 } }
+                  [ M.typography
+                      { id: "my-snippets-heading"
+                      , component: "h2"
+                      , variant: "overline"
+                      , sx: { display: "block", px: 2, py: 0.75, color: "text.secondary", fontWeight: 700 }
+                      }
+                      [ R.text "My snippets" ]
+                  , if Array.null props.snippets then
+                      M.typography
+                        { variant: "body2"
+                        , sx: { px: 2, py: 1, color: "text.secondary" }
+                        }
+                        [ R.text "No snippets yet" ]
+                    else
+                      M.list
+                        { dense: true
+                        , "aria-label": "My snippets"
+                        , sx: { py: 0.0 }
+                        }
+                        ( map
+                            ( \name ->
+                                keyed ("snippet-" <> name)
+                                  (snippetListItem props editDisabled name)
+                            )
+                            props.snippets
+                        )
+                  ]
+              , M.divider {}
+              , M.box { component: "section", "aria-labelledby": "examples-heading", sx: { py: 0.5 } }
+                  ( [ M.typography
+                        { id: "examples-heading"
+                        , component: "h2"
+                        , variant: "overline"
+                        , sx: { display: "block", px: 2, py: 0.75, color: "text.secondary", fontWeight: 700 }
+                        }
+                        [ R.text "Examples" ]
+                    , M.list
+                        { dense: true
+                        , "aria-label": "Examples"
+                        , sx: { py: 0.0 }
+                        }
+                        ( map
+                            ( \example ->
+                                keyed ("example-" <> example.name)
+                                  (exampleRow props example)
+                            )
+                            props.examples
+                        )
+                    ]
+                      <> exampleSaveAction props
                   )
               ]
           , M.divider {}
@@ -844,15 +1020,15 @@ snippetDrawer props =
           ]
       ]
 
-snippetListItem :: SnippetDrawerProps -> Boolean -> Int -> String -> JSX
-snippetListItem props editDisabled snippetCount name =
+snippetListItem :: SnippetDrawerProps -> Boolean -> String -> JSX
+snippetListItem props editDisabled name =
   case props.renamingSnippet of
     Just editing
       | editing == name -> renameSnippetRow props name editDisabled
-    _ -> snippetRow props editDisabled snippetCount name
+    _ -> snippetRow props editDisabled name
 
-snippetRow :: SnippetDrawerProps -> Boolean -> Int -> String -> JSX
-snippetRow props editDisabled snippetCount name =
+snippetRow :: SnippetDrawerProps -> Boolean -> String -> JSX
+snippetRow props editDisabled name =
   let
     active =
       props.activeSnippet == Just name
@@ -915,7 +1091,7 @@ snippetRow props editDisabled snippetCount name =
                       { size: "small"
                       , "aria-label": "Delete " <> name
                       , onClick: props.deleteSnippet name
-                      , disabled: editDisabled || snippetCount <= 1
+                      , disabled: editDisabled
                       , sx: { width: 30, height: 30 }
                       }
                       [ M.deleteIcon { fontSize: "small" } ]
@@ -970,6 +1146,49 @@ renameSnippetRow props name editDisabled =
             M.typography { variant: "caption", sx: { color: "error.main", display: "block", mt: 0.5 } } [ R.text props.renameError ]
         ]
     ]
+
+exampleRow :: SnippetDrawerProps -> ExampleItem -> JSX
+exampleRow props example =
+  let
+    active =
+      props.activeDocument == ActiveExample example.name
+  in
+    M.listItem { disablePadding: true }
+      [ M.listItemButton
+          { selected: active
+          , onClick: props.loadExample example.name
+          , disabled: props.busy
+          , "data-testid": "example-row"
+          , sx: { py: 1 }
+          }
+          [ M.listItemText
+              { primary: example.name
+              , secondary:
+                  if active then
+                    "read-only example"
+                  else
+                    ""
+              , primaryTypographyProps: { noWrap: true }
+              }
+          ]
+      ]
+
+exampleSaveAction :: SnippetDrawerProps -> Array JSX
+exampleSaveAction props =
+  case activeExampleName props.activeDocument of
+    Nothing -> []
+    Just _ ->
+      [ M.box { sx: { px: 2, py: 1 } }
+          [ M.button
+              { variant: "outlined"
+              , size: "small"
+              , fullWidth: true
+              , onClick: props.saveExampleAsSnippet (activeDocumentName props.activeDocument)
+              , disabled: props.busy
+              }
+              [ M.addIcon { fontSize: "small" }, R.text "Save as my snippet" ]
+          ]
+      ]
 
 historyItems :: Array CommitInfo -> Maybe CommitInfo -> Boolean -> (CommitInfo -> Effect Unit) -> Array JSX
 historyItems history viewingVersion busy viewHistory =
@@ -1132,6 +1351,49 @@ newSnippetDialog props =
     , M.dialogActions {}
         [ M.button { onClick: props.close, disabled: props.busy } [ R.text "Cancel" ]
         , M.button { variant: "contained", onClick: props.createSnippet, disabled: props.busy } [ R.text "Create" ]
+        ]
+    ]
+
+footerCredit :: JSX
+footerCredit =
+  M.box
+    { component: "footer"
+    , sx:
+        { flex: "0 0 auto"
+        , borderTop: "1px solid"
+        , borderColor: "divider"
+        , px: 3
+        , py: 1
+        , bgcolor: "#f8fafc"
+        }
+    }
+    [ M.typography
+        { variant: "caption"
+        , sx:
+            { color: "text.secondary"
+            , lineHeight: 1.45
+            , display: "block"
+            }
+        }
+        [ R.text "plutus-browser runs the real Plutus CEK + cost model compiled to wasm32, from the 32-bit-correct fork "
+        , M.link
+            { href: "https://github.com/lambdasistemi/plutus"
+            , target: "_blank"
+            , rel: "noopener"
+            , color: "inherit"
+            , underline: "hover"
+            }
+            [ R.text "lambdasistemi/plutus" ]
+        , R.text " (UPLC evaluation correct on 32-bit / browser targets, byte-identical to the 64-bit chain). Evaluator release "
+        , M.link
+            { href: "https://github.com/lambdasistemi/plutus/releases/tag/1.65.0.0-wasm32.1"
+            , target: "_blank"
+            , rel: "noopener"
+            , color: "inherit"
+            , underline: "hover"
+            }
+            [ R.text "1.65.0.0-wasm32.1" ]
+        , R.text "."
         ]
     ]
 
