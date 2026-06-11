@@ -58,6 +58,15 @@ test("seeds verified examples on first run and persists them", async ({ page }) 
 
   await page.goto("/");
   await waitForSnippetStore(page);
+  await expect(page).toHaveTitle("Plutus Browser");
+  await expect(page.getByRole("link", { name: "repo" })).toHaveAttribute(
+    "href",
+    "https://github.com/lambdasistemi/plutus-browser",
+  );
+  await expect(page.getByRole("link", { name: "evaluator" })).toHaveAttribute(
+    "href",
+    "https://github.com/lambdasistemi/plutus/releases/tag/1.65.0.0-wasm32.1",
+  );
 
   await expect(snippetRows(page)).toHaveCount(seededExampleCount);
   await page.getByRole("button", { name: snippetButtonPattern(factorialExampleName) }).click();

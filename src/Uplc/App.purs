@@ -1144,10 +1144,10 @@ appBar activeName =
             , component: "h1"
             , sx: { flexGrow: 1, fontWeight: 700 }
             }
-            [ R.text "UPLC Browser CEK" ]
+            [ R.text "Plutus Browser" ]
         , M.chip { label: activeName, color: "secondary", variant: "outlined" }
         , M.link
-            { href: "https://github.com/lambdasistemi/plutus"
+            { href: "https://github.com/lambdasistemi/plutus-browser"
             , target: "_blank"
             , rel: "noopener"
             , color: "inherit"
@@ -1161,7 +1161,7 @@ appBar activeName =
             , color: "inherit"
             , underline: "hover"
             }
-            [ R.text "release" ]
+            [ R.text "evaluator" ]
         ]
     ]
 
