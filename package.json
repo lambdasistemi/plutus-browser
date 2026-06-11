@@ -6,10 +6,11 @@
   "description": "Browser UI for the wasm32 Plutus evaluator",
   "scripts": {
     "prepare:wasm": "mkdir -p src/assets && curl -fsSL -o src/assets/uplc.wasm https://github.com/lambdasistemi/plutus/releases/download/1.65.0.0-wasm32.1/uplc.wasm",
+    "generate:examples": "node scripts/generate-examples.mjs",
     "clean": "rm -rf dist",
     "copy:index": "cp index.html dist/index.html",
     "build:deps": "mkdir -p dist && esbuild src/bootstrap.js --bundle --format=iife --platform=browser --outfile=dist/deps.js --loader:.wasm=binary --minify",
-    "build:ps": "spago bundle --offline --module Main --outfile dist/index.ps.js",
+    "build:ps": "npm run generate:examples && spago bundle --offline --module Main --outfile dist/index.ps.js",
     "build:concat": "cat dist/deps.js dist/index.ps.js > dist/index.js && rm dist/deps.js dist/index.ps.js",
     "build:inside": "npm run clean && npm run build:deps && npm run build:ps && npm run build:concat && npm run copy:index",
     "build": "npm run prepare:wasm && npm run build:inside",

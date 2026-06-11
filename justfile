@@ -1,4 +1,5 @@
 build:
+    npm run generate:examples
     spago build
 
 bundle:
@@ -8,6 +9,7 @@ install:
     npm ci
 
 dev:
+    npm run generate:examples
     spago build --watch
 
 serve:

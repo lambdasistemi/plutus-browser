@@ -1,0 +1,1 @@
+(program 1.0.0 [ [ (lam f [ (lam x [ f (lam v [ [ x x ] v ]) ]) (lam x [ f (lam v [ [ x x ] v ]) ]) ]) (lam rec (lam n (force [ [ [ (force (builtin ifThenElse)) [ [ (builtin equalsInteger) n ] (con integer 0) ] ] (delay (con integer 1)) ] (delay [ [ (builtin multiplyInteger) n ] [ rec [ [ (builtin subtractInteger) n ] (con integer 1) ] ] ]) ]))) ] (con integer 5) ])
