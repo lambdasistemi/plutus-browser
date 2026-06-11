@@ -11,6 +11,7 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.CodeUnits as CodeUnits
 import Data.String.Common as String
 import Data.String.Pattern (Pattern(..), Replacement(..))
+import Data.Traversable (traverse_)
 import Effect (Effect)
 import Effect.Aff (attempt, launchAff_)
 import Effect.Class (liftEffect)
@@ -26,6 +27,8 @@ import SpaKit.BrowserGit as BrowserGit
 import SpaKit.CodeMirror (codeEditor)
 import SpaKit.MUI as M
 import SpaKit.WasiRunner (WasmCliResult)
+import Uplc.DialogControls as DialogControls
+import Uplc.Examples (examples)
 import Uplc.Format (formatUplc)
 import Uplc.Runner (runUplc)
 import Uplc.SnippetImport (fetchText, readFirstFileText)
@@ -33,10 +36,15 @@ import Uplc.Timer as Timer
 
 defaultProgram :: String
 defaultProgram =
-  "(program 1.0.0 [ [ (builtin addInteger) (con integer 40) ] (con integer 2) ])"
+  case Array.head examples of
+    Just example -> example.program
+    Nothing -> "(program 1.0.0 [ [ (builtin addInteger) (con integer 40) ] (con integer 2) ])"
 
 defaultSnippetName :: String
-defaultSnippetName = "Example"
+defaultSnippetName =
+  case Array.head examples of
+    Just example -> example.name
+    Nothing -> "Example"
 
 defaultAutoEvalDebounceMs :: Int
 defaultAutoEvalDebounceMs = 350
@@ -92,8 +100,16 @@ loadInitialSnippets fallback setBusy applyState reportError =
         existingNames = snippetNamesFromFiles files
       names <-
         if Array.null existingNames then do
-          _ <- BrowserGit.writeAndCommit repo (snippetPath defaultSnippetName) fallback ("create " <> defaultSnippetName)
-          pure [ defaultSnippetName ]
+          if Array.null examples then do
+            _ <- BrowserGit.writeAndCommit repo (snippetPath defaultSnippetName) fallback ("create " <> defaultSnippetName)
+            pure [ defaultSnippetName ]
+          else do
+            traverse_
+              ( \example ->
+                  BrowserGit.writeAndCommit repo (snippetPath example.name) example.program ("create " <> example.name)
+              )
+              examples
+            pure (map _.name examples)
         else
           pure existingNames
       let
@@ -266,6 +282,11 @@ mkApp = component "UplcApp" \_ -> React.do
     openNewDialog = do
       resetNewDialog
       setNewOpen (const true)
+
+    changeNewSource :: String -> Effect Unit
+    changeNewSource source = do
+      setNewSource (const source)
+      setNewError (const "")
 
     readSnippetFile :: SyntheticEvent -> Effect Unit
     readSnippetFile event = do
@@ -472,7 +493,7 @@ mkApp = component "UplcApp" \_ -> React.do
                 , error: newError
                 , busy: storeBusy
                 , setName: setNewName
-                , setSource: setNewSource
+                , setSource: changeNewSource
                 , setCopySource: setNewCopySource
                 , setUrl: setNewUrl
                 , readSnippetFile
@@ -626,7 +647,7 @@ type NewSnippetDialogProps =
   , error :: String
   , busy :: Boolean
   , setName :: (String -> String) -> Effect Unit
-  , setSource :: (String -> String) -> Effect Unit
+  , setSource :: String -> Effect Unit
   , setCopySource :: (String -> String) -> Effect Unit
   , setUrl :: (String -> String) -> Effect Unit
   , readSnippetFile :: SyntheticEvent -> Effect Unit
@@ -640,11 +661,14 @@ newSnippetDialog props =
     { open: props.open
     , onClose: handler_ props.close
     , fullWidth: true
-    , maxWidth: "sm"
+    , maxWidth: "md"
+    , "PaperProps": { sx: { width: "min(720px, calc(100vw - 32px))" } }
     }
     [ M.dialogTitle {} [ R.text "New snippet" ]
     , M.dialogContent
-        { sx: { display: "flex", flexDirection: "column", gap: 2, pt: 1 } }
+        { dividers: true
+        , sx: { display: "flex", flexDirection: "column", gap: 2.5, pt: "20px !important", pb: 3 }
+        }
         [ M.textField
             { label: "Snippet name"
             , value: props.name
@@ -652,52 +676,62 @@ newSnippetDialog props =
             , autoFocus: true
             , fullWidth: true
             }
-        , M.stack { spacing: 1 }
-            [ M.typography { variant: "body2", sx: { fontWeight: 700 } } [ R.text "Snippet source" ]
-            , R.select
-                { title: "Snippet source"
-                , value: props.source
-                , onChange:
-                    handler DOMEvents.targetValue \next ->
-                      case next of
-                        Just value -> props.setSource (const value)
-                        Nothing -> pure unit
-                , children:
-                    [ R.option { value: "empty", children: [ R.text "Empty" ] }
-                    , R.option { value: "copy", children: [ R.text "Copy of snippet" ] }
-                    , R.option { value: "file", children: [ R.text "From local file" ] }
-                    , R.option { value: "url", children: [ R.text "From URL" ] }
-                    ]
-                }
+        , DialogControls.selectField
+            { id: "new-snippet-source"
+            , label: "Snippet source"
+            , value: props.source
+            , onChange:
+                handler DOMEvents.targetValue \next ->
+                  case next of
+                    Just value -> props.setSource value
+                    Nothing -> pure unit
+            }
+            [ DialogControls.menuItem { value: "empty" } [ R.text "Empty" ]
+            , DialogControls.menuItem { value: "copy" } [ R.text "Copy of snippet" ]
+            , DialogControls.menuItem { value: "file" } [ R.text "From local file" ]
+            , DialogControls.menuItem { value: "url" } [ R.text "From URL" ]
             ]
         , case props.source of
             "copy" ->
-              M.stack { spacing: 1 }
-                [ M.typography { variant: "body2", sx: { fontWeight: 700 } } [ R.text "Copy source" ]
-                , R.select
-                    { title: "Copy source"
-                    , value: props.copySource
-                    , onChange:
-                        handler DOMEvents.targetValue \next ->
-                          case next of
-                            Just value -> props.setCopySource (const value)
-                            Nothing -> pure unit
-                    , children:
-                        ( map
-                            (\name -> R.option { value: name, children: [ R.text name ] })
-                            props.snippets
-                        )
-                    }
-                ]
+              DialogControls.selectField
+                { id: "new-snippet-copy-source"
+                , label: "Copy source"
+                , value: props.copySource
+                , onChange:
+                    handler DOMEvents.targetValue \next ->
+                      case next of
+                        Just value -> props.setCopySource (const value)
+                        Nothing -> pure unit
+                }
+                ( map
+                    (\name -> DialogControls.menuItem { value: name } [ R.text name ])
+                    props.snippets
+                )
             "file" ->
-              M.stack { spacing: 1 }
-                [ R.input
-                    { title: "Snippet file"
-                    , type: "file"
-                    , accept: ".uplc,text/plain"
-                    , onChange: handler syntheticEvent props.readSnippetFile
+              M.stack { spacing: 1.25, alignItems: "flex-start" }
+                [ M.button
+                    { variant: "outlined"
+                    , component: "label"
+                    , disabled: props.busy
                     }
-                , M.typography { variant: "body2", sx: { color: "text.secondary" } } [ R.text props.fileLabel ]
+                    [ M.addIcon { fontSize: "small" }
+                    , R.text "Choose local file"
+                    , R.input
+                        { title: "Snippet file"
+                        , type: "file"
+                        , accept: ".uplc,text/plain"
+                        , hidden: true
+                        , onChange: handler syntheticEvent props.readSnippetFile
+                        }
+                    ]
+                , M.typography { variant: "body2", sx: { color: "text.secondary" } }
+                    [ R.text
+                        ( if String.null props.fileLabel then
+                            "No file selected"
+                          else
+                            props.fileLabel
+                        )
+                    ]
                 ]
             "url" ->
               M.textField

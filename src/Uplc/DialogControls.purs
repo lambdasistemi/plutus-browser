@@ -1,0 +1,10 @@
+module Uplc.DialogControls
+  ( menuItem
+  , selectField
+  ) where
+
+import React.Basic (JSX)
+
+foreign import selectField :: forall r. Record r -> Array JSX -> JSX
+
+foreign import menuItem :: forall r. Record r -> Array JSX -> JSX
