@@ -98,8 +98,9 @@ Everything happens in the single page:
 - **Auto-versioning** — edits to a snippet are auto-committed (default
   debounce 1500 ms). The **History** panel lists commits; selecting one
   shows that version read-only, and **Restore version** commits it back.
-- **Examples** — bundled read-only programs; edit one and **Save as my
-  snippet** to keep your changes. Examples cover integer/bytestring
+- **Examples** — bundled programs, editable in place (the row shows
+  *edited example*), but edits are not persisted until you press **Save as
+  my snippet**. Examples cover integer/bytestring
   builtins, if-then-else, lambdas, recursion via fixpoint, lists,
   constr/case, and tracing/error.
 
